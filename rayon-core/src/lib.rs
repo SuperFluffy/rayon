@@ -62,6 +62,8 @@ mod thread_pool;
 mod unwind;
 mod util;
 
+#[cfg(feature = "unstable")]
+pub mod internal;
 pub use thread_pool::ThreadPool;
 pub use join::join;
 pub use scope::{scope, Scope};

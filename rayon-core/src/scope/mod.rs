@@ -14,6 +14,7 @@ use unwind;
 
 #[cfg(test)]
 mod test;
+mod internal;
 
 pub struct Scope<'scope> {
     /// thread where `scope()` was executed (note that individual jobs

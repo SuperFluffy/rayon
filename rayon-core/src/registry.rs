@@ -237,8 +237,8 @@ impl Registry {
     /// worker thread for the registry, this will push onto the
     /// deque. Else, it will inject from the outside (which is slower).
     pub fn inject_or_push(&self, job_ref: JobRef) {
+        let worker_thread = WorkerThread::current();
         unsafe {
-            let worker_thread = WorkerThread::current();
             if !worker_thread.is_null() && (*worker_thread).registry().id() == self.id() {
                 (*worker_thread).push(job_ref);
             } else {
@@ -247,9 +247,10 @@ impl Registry {
         }
     }
 
-    /// Unsafe: caller asserts that injected jobs will remain valid
-    /// until they are executed.
-    pub unsafe fn inject(&self, injected_jobs: &[JobRef]) {
+    /// Push a job into the "external jobs" queue; it will be taken by
+    /// whatever worker has nothing to do. Use this is you know that
+    /// you are not on a worker of this registry.
+    pub fn inject(&self, injected_jobs: &[JobRef]) {
         log!(InjectJobs { count: injected_jobs.len() });
         {
             let state = self.state.lock().unwrap();

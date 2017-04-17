@@ -168,3 +168,7 @@ impl Drop for ThreadPool {
     }
 }
 
+/// Crate-local: accesses the registry from the thread-pool
+pub fn registry(tp: &ThreadPool) -> &Registry {
+    &tp.registry
+}

@@ -8,6 +8,9 @@
 
 extern crate rayon_core;
 
+#[cfg(feature = "unstable")]
+extern crate futures;
+
 #[cfg(test)]
 extern crate rand;
 
@@ -16,6 +19,8 @@ mod delegate;
 
 #[macro_use]
 mod private;
+
+mod future;
 
 pub mod collections;
 pub mod iter;
