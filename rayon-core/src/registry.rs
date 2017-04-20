@@ -1,7 +1,8 @@
 use ::{Configuration, ExitHandler, PanicHandler, StartHandler};
 use deque;
 use deque::{Worker, Stealer, Stolen};
-use job::{JobRef, StackJob};
+use job::{Job, JobRef, StackJob};
+use internal::task::Task;
 use latch::{LatchProbe, Latch, CountLatch, LockLatch};
 #[allow(unused_imports)]
 use log::Event::*;
@@ -243,6 +244,52 @@ impl Registry {
                 (*worker_thread).push(job_ref);
             } else {
                 self.inject(&[job_ref]);
+            }
+        }
+    }
+
+    /// Unsafe: the caller must guarantee that `task` will stay valid
+    /// until it executes.
+    pub unsafe fn submit_task<T>(&self, task: Arc<T>)
+        where T: Task
+    {
+        let task_job = TaskJob::new(task);
+        let task_job_ref = TaskJob::into_job_ref(task_job);
+        return self.inject_or_push(task_job_ref);
+
+        /// A little newtype wrapper for `T`, just because I did not
+        /// want to implement `Job` for all `T: Task`.
+        #[allow(dead_code)]
+        struct TaskJob<T: Task> {
+            data: T
+        }
+
+        impl<T: Task> TaskJob<T> {
+            fn new(arc: Arc<T>) -> Arc<Self> {
+                // `TaskJob<T>` has the same layout as `T`, so we can safely
+                // tranmsute this `T` into a `TaskJob<T>`. This lets us write our
+                // impls of `Job` for `TaskJob<T>`, making them more restricted.
+                // Since `Job` is a private trait, this is not strictly necessary,
+                // I don't think, but makes me feel better.
+                unsafe { mem::transmute(arc) }
+            }
+
+            pub fn into_task(this: Arc<TaskJob<T>>) -> Arc<T> {
+                // Same logic as `new()`
+                unsafe { mem::transmute(this) }
+            }
+
+            unsafe fn into_job_ref(this: Arc<Self>) -> JobRef {
+                let this: *const Self = mem::transmute(this);
+                JobRef::new(this)
+            }
+        }
+
+        impl<T: Task> Job for TaskJob<T> {
+            unsafe fn execute(this: *const Self) {
+                let this: Arc<Self> = mem::transmute(this);
+                let task: Arc<T> = TaskJob::into_task(this);
+                Task::execute(task);
             }
         }
     }
@@ -603,3 +650,5 @@ unsafe fn in_worker_cold<OP, R>(op: OP) -> R
     job.latch.wait();
     job.into_result()
 }
+
+

@@ -51,8 +51,6 @@ mod latch;
 mod join;
 mod job;
 mod registry;
-#[cfg(feature = "unstable")]
-mod future;
 mod scope;
 mod sleep;
 #[cfg(feature = "unstable")]
@@ -69,10 +67,6 @@ pub use join::join;
 pub use scope::{scope, Scope};
 #[cfg(feature = "unstable")]
 pub use spawn::spawn;
-#[cfg(feature = "unstable")]
-pub use spawn::spawn_future;
-#[cfg(feature = "unstable")]
-pub use future::RayonFuture;
 
 /// Returns the number of threads in the current registry. If this
 /// code is executing within the Rayon thread-pool, then this will be

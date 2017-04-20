@@ -1,16 +1,13 @@
-//! Future support in Rayon. This module *primary* consists of
-//! internal APIs that are exposed through `Scope::spawn_future` and
-//! `::spawn_future`.  However, the type `RayonFuture` is a public
-//! type exposed to all users.
+//! Future support in Rayon.
 //!
 //! See `README.md` for details.
 
 // TODO use latch::LatchProbe;
-use futures::{Async, Poll};
+use futures::{Async, Future, Poll};
 use futures::executor;
 use futures::future::CatchUnwind;
 use futures::task::{self, Spawn, Task, Unpark};
-use rayon_core::internal::task::{Task as RayonTask};
+use rayon_core::internal::task::{Task as RayonTask, ScopeHandle, ToScopeHandle};
 use rayon_core::internal::worker;
 use std::any::Any;
 use std::panic::{self, AssertUnwindSafe};
@@ -20,13 +17,41 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::*;
 use std::sync::Mutex;
 
-pub use futures::Future;
-
 const STATE_PARKED: usize = 0;
 const STATE_UNPARKED: usize = 1;
 const STATE_EXECUTING: usize = 2;
 const STATE_EXECUTING_UNPARKED: usize = 3;
 const STATE_COMPLETE: usize = 4;
+
+pub trait ScopeFutureExt<'scope> {
+    fn spawn_future<F>(&self, future: F) -> RayonFuture<F::Item, F::Error>
+        where F: Future + Send + 'scope;
+}
+
+impl<'scope, T> ScopeFutureExt<'scope> for T
+    where T: ToScopeHandle<'scope>
+{
+    fn spawn_future<F>(&self, future: F) -> RayonFuture<F::Item, F::Error>
+        where F: Future + Send + 'scope
+    {
+        let inner = ScopeFuture::spawn(future, self.to_scope_handle());
+
+        // We assert that it is safe to hide the type `F` (and, in
+        // particular, the lifetimes in it). This is true because the API
+        // offered by a `RayonFuture` only permits access to the result of
+        // the future (of type `F::Item` or `F::Error`) and those types
+        // *are* exposed in the `RayonFuture<F::Item, F::Error>` type. See
+        // README.md for details.
+        unsafe {
+            return RayonFuture { inner: hide_lifetime(inner) };
+        }
+
+        unsafe fn hide_lifetime<'l, T, E>(x: Arc<ScopeFutureTrait<T, E> + 'l>)
+                                          -> Arc<ScopeFutureTrait<T, E>> {
+            mem::transmute(x)
+        }
+    }
+}
 
 /// Represents the result of a future that has been spawned in the
 /// Rayon threadpool.
@@ -36,47 +61,7 @@ const STATE_COMPLETE: usize = 4;
 /// Any panics that occur while computing the spawned future will be
 /// propagated when this future is polled.
 pub struct RayonFuture<T, E> {
-    // Warning: Public end-user API!
     inner: Arc<ScopeFutureTrait<Result<T, E>, Box<Any + Send + 'static>>>,
-}
-
-/// Unsafe because implementor must guarantee:
-///
-/// 1. That the type `Self` remains dynamically valid until one of the
-///    completion methods is called.
-/// 2. That the lifetime `'scope` cannot end until one of those
-///    methods is called.
-///
-/// NB. Although this is public, it is not exposed to outside users.
-pub unsafe trait FutureScope<'scope>: 'scope {
-    fn spawn_task<T: RayonTask + 'scope>(&self, task: Arc<T>);
-    fn future_panicked(self, err: Box<Any + Send>);
-    fn future_completed(self);
-}
-
-/// Create a `RayonFuture` that will execute `F` and yield its result,
-/// propagating any panics.
-///
-/// NB. Although this is public, it is not exposed to outside users.
-pub fn new_rayon_future<'scope, F, S>(future: F, scope: S) -> RayonFuture<F::Item, F::Error>
-    where F: Future + Send + 'scope, S: FutureScope<'scope>,
-{
-    let inner = ScopeFuture::spawn(future, scope);
-
-    // We assert that it is safe to hide the type `F` (and, in
-    // particular, the lifetimes in it). This is true because the API
-    // offered by a `RayonFuture` only permits access to the result of
-    // the future (of type `F::Item` or `F::Error`) and those types
-    // *are* exposed in the `RayonFuture<F::Item, F::Error>` type. See
-    // README.md for details.
-    unsafe {
-        return RayonFuture { inner: hide_lifetime(inner) };
-    }
-
-    unsafe fn hide_lifetime<'l, T, E>(x: Arc<ScopeFutureTrait<T, E> + 'l>)
-                                      -> Arc<ScopeFutureTrait<T, E>> {
-        mem::transmute(x)
-    }
 }
 
 impl<T, E> RayonFuture<T, E> {
@@ -122,7 +107,7 @@ impl<T, E> Drop for RayonFuture<T, E> {
 /// ////////////////////////////////////////////////////////////////////////
 
 struct ScopeFuture<'scope, F, S>
-    where F: Future + Send + 'scope, S: FutureScope<'scope>,
+    where F: Future + Send + 'scope, S: ScopeHandle<'scope>,
 {
     state: AtomicUsize,
     contents: Mutex<ScopeFutureContents<'scope, F, S>>,
@@ -133,7 +118,7 @@ type CUItem<F> = <CU<F> as Future>::Item;
 type CUError<F> = <CU<F> as Future>::Error;
 
 struct ScopeFutureContents<'scope, F, S>
-    where F: Future + Send + 'scope, S: FutureScope<'scope>,
+    where F: Future + Send + 'scope, S: ScopeHandle<'scope>,
 {
     spawn: Option<Spawn<CU<F>>>,
     unpark: Option<Arc<Unpark>>,
@@ -155,14 +140,14 @@ struct ScopeFutureContents<'scope, F, S>
 
 // Assert that the `*const` is safe to transmit between threads:
 unsafe impl<'scope, F, S> Send for ScopeFuture<'scope, F, S>
-    where F: Future + Send + 'scope, S: FutureScope<'scope>,
+    where F: Future + Send + 'scope, S: ScopeHandle<'scope>,
 {}
 unsafe impl<'scope, F, S> Sync for ScopeFuture<'scope, F, S>
-    where F: Future + Send + 'scope, S: FutureScope<'scope>,
+    where F: Future + Send + 'scope, S: ScopeHandle<'scope>,
 {}
 
 impl<'scope, F, S> ScopeFuture<'scope, F, S>
-    where F: Future + Send + 'scope, S: FutureScope<'scope>,
+    where F: Future + Send + 'scope, S: ScopeHandle<'scope>,
 {
     fn spawn(future: F, scope: S) -> Arc<Self> {
         // Using `AssertUnwindSafe` is valid here because (a) the data
@@ -237,9 +222,16 @@ impl<'scope, F, S> ScopeFuture<'scope, F, S>
                         let contents = self.contents.lock().unwrap();
                         let task_ref = contents.this.clone()
                                                     .expect("this ref already dropped");
-                        contents.scope.as_ref()
-                                      .expect("scope already dropped")
-                                      .spawn_task(task_ref);
+
+                        // We assert that `contents.scope` will be not
+                        // be dropped until the task is executed. This
+                        // is true because we only drop
+                        // `contents.scope` from within `RayonTask::execute()`.
+                        unsafe {
+                            contents.scope.as_ref()
+                                          .expect("scope already dropped")
+                                          .spawn_task(task_ref);
+                        }
                         return;
                     }
                 }
@@ -312,7 +304,7 @@ impl<'scope, F, S> ScopeFuture<'scope, F, S>
 }
 
 impl<'scope, F, S> Unpark for ScopeFuture<'scope, F, S>
-    where F: Future + Send + 'scope, S: FutureScope<'scope>,
+    where F: Future + Send + 'scope, S: ScopeHandle<'scope>,
 {
     fn unpark(&self) {
         self.unpark_inherent();
@@ -320,7 +312,7 @@ impl<'scope, F, S> Unpark for ScopeFuture<'scope, F, S>
 }
 
 impl<'scope, F, S> RayonTask for ScopeFuture<'scope, F, S>
-    where F: Future + Send + 'scope, S: FutureScope<'scope>,
+    where F: Future + Send + 'scope, S: ScopeHandle<'scope>,
 {
     fn execute(this: Arc<Self>) {
         // *generally speaking* there should be no contention for the
@@ -352,7 +344,7 @@ impl<'scope, F, S> RayonTask for ScopeFuture<'scope, F, S>
 }
 
 impl<'scope, F, S> ScopeFutureContents<'scope, F, S>
-    where F: Future + Send + 'scope, S: FutureScope<'scope>,
+    where F: Future + Send + 'scope, S: ScopeHandle<'scope>,
 {
     fn poll(&mut self) -> Poll<CUItem<F>, CUError<F>> {
         let unpark = self.unpark.clone().unwrap();
@@ -395,15 +387,14 @@ impl<'scope, F, S> ScopeFutureContents<'scope, F, S>
         // to `new_rayon_future()` ensures it for us.
         let scope = self.scope.take().unwrap();
         if let Some(err) = err {
-            scope.future_panicked(err);
+            scope.panicked(err);
         } else {
-            scope.future_completed();
+            scope.ok();
         }
     }
 }
 
-/// NB. Although this is public, it is not exposed to outside users.
-pub trait ScopeFutureTrait<T, E>: Send + Sync {
+trait ScopeFutureTrait<T, E>: Send + Sync {
     /// Returns true when future is in the COMPLETE state.
     fn probe(&self) -> bool;
 
@@ -417,7 +408,7 @@ pub trait ScopeFutureTrait<T, E>: Send + Sync {
 }
 
 impl<'scope, F, S> ScopeFutureTrait<CUItem<F>, CUError<F>> for ScopeFuture<'scope, F, S>
-    where F: Future + Send, S: FutureScope<'scope>,
+    where F: Future + Send, S: ScopeHandle<'scope>,
 {
     fn probe(&self) -> bool {
         self.state.load(Acquire) == STATE_COMPLETE

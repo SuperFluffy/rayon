@@ -20,7 +20,8 @@ mod delegate;
 #[macro_use]
 mod private;
 
-mod future;
+#[cfg(feature = "unstable")]
+pub mod future;
 
 pub mod collections;
 pub mod iter;
@@ -44,7 +45,3 @@ pub use rayon_core::join;
 pub use rayon_core::{scope, Scope};
 #[cfg(feature = "unstable")]
 pub use rayon_core::spawn;
-#[cfg(feature = "unstable")]
-pub use rayon_core::spawn_future;
-#[cfg(feature = "unstable")]
-pub use rayon_core::RayonFuture;

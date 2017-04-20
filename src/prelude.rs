@@ -10,3 +10,4 @@ pub use iter::IndexedParallelIterator;
 pub use iter::ParallelIterator;
 pub use slice::ParallelSlice;
 pub use str::ParallelString;
+pub use future::ScopeFutureExt;
